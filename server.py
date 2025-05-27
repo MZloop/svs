@@ -1,68 +1,60 @@
 from flask import Flask, request, jsonify, send_from_directory
-import subprocess
 import os
+import subprocess
 import uuid
+from threading import Thread
 
 app = Flask(__name__)
 
-# Create 'Saved' directory if it doesn't exist
-SAVE_FOLDER = os.path.join(os.getcwd(), 'Saved')
-os.makedirs(SAVE_FOLDER, exist_ok=True)
+SAVE_DIR = "Saved"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+def run_conversion(url, filename):
+    full_path = os.path.join(SAVE_DIR, filename)
+    cmd = [
+        "streamlink", url, "best",
+        "-o", full_path
+    ]
+    print(f"[DEBUG] Running streamlink command: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        print(f"[DEBUG] streamlink finished with return code {result.returncode}")
+        if result.stdout:
+            print("[STDOUT]", result.stdout.decode())
+        if result.stderr:
+            print("[STDERR]", result.stderr.decode())
+    except Exception as e:
+        print(f"[ERROR] streamlink crashed: {e}")
 
 @app.route("/")
-def index():
-    return "Flask video converter server running."
+def home():
+    return jsonify({"status": "Video Converter Server is running."})
 
 @app.route("/convert", methods=["POST"])
 def convert_video():
-    try:
-        data = request.get_json()
-        video_url = data.get("url")
-        print(f"[DEBUG] Received video URL: {video_url}")  # Debug print
+    data = request.get_json()
+    url = data.get("url")
+    if not url:
+        return jsonify({"error": "Missing 'url' field"}), 400
 
-        if not video_url:
-            return jsonify({"error": "Missing 'url' in request"}), 400
+    print(f"[DEBUG] Received video URL: {url}")
 
-        # Unique filename to avoid collisions
-        filename = f"video_{uuid.uuid4().hex[:8]}.mp4"
-        full_path = os.path.join(SAVE_FOLDER, filename)
+    # Generate unique filename
+    filename = f"{uuid.uuid4().hex}.mp4"
 
-        # Streamlink command to download m3u8 as mp4
-        result = subprocess.run(
-            [
-                "streamlink",
-                "--stream-segment-attempts", "10",
-                "--stream-segment-threads", "4",
-                video_url,
-                "best",
-                "-o", full_path
-            ],
-            capture_output=True,
-            text=True
-        )
+    # Start background thread
+    Thread(target=run_conversion, args=(url, filename)).start()
 
-        print("[DEBUG] Streamlink stdout:", result.stdout)
-        print("[DEBUG] Streamlink stderr:", result.stderr)
+    download_url = f"{request.url_root}Saved/{filename}"
+    return jsonify({
+        "message": "Conversion started.",
+        "download_url": download_url
+    })
 
-        if result.returncode != 0:
-            return jsonify({
-                "error": "Failed to convert video",
-                "details": result.stderr
-            }), 500
-
-        # Return the download link to the client
-        return jsonify({
-            "download_url": f"http://{request.host}/Saved/{filename}",
-            "filename": filename
-        })
-
-    except Exception as e:
-        print("[ERROR] Server exception:", str(e))
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/Saved/<path:filename>", methods=["GET"])
-def serve_video(filename):
-    return send_from_directory(SAVE_FOLDER, filename)
+@app.route("/Saved/<path:filename>")
+def serve_file(filename):
+    return send_from_directory(SAVE_DIR, filename)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001)
+    app.run(debug=True, host="0.0.0.0", port=5001)
+
